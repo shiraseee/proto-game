@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import '../models/memory.dart';
 import '../services/app_state.dart';
 import '../services/gemini_service.dart';
@@ -11,7 +12,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <ChatMessage>[];
@@ -19,6 +20,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   bool _greetingShown = false;
   late AnimationController _bounceController;
   late Animation<double> _bounceAnimation;
+
+  // Voice input
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _speechAvailable = false;
+  bool _isListening = false;
+  String _lastLocaleId = '';
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   @override
   void initState() {
@@ -31,6 +40,86 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _bounceAnimation = Tween<double>(begin: 0, end: -10).animate(
       CurvedAnimation(parent: _bounceController, curve: Curves.easeInOut),
     );
+
+    // Pulse animation for mic button while listening
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.3).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _initSpeech();
+  }
+
+  Future<void> _initSpeech() async {
+    _speechAvailable = await _speech.initialize(
+      onStatus: (status) {
+        // When speech recognition stops naturally (e.g. silence detected)
+        if (status == 'done' || status == 'notListening') {
+          if (mounted && _isListening) {
+            setState(() => _isListening = false);
+            _pulseController.stop();
+            _pulseController.reset();
+          }
+        }
+      },
+      onError: (error) {
+        if (mounted) {
+          setState(() => _isListening = false);
+          _pulseController.stop();
+          _pulseController.reset();
+        }
+      },
+    );
+
+    // Pick best locale (prefer user's language)
+    if (_speechAvailable) {
+      final locales = await _speech.locales();
+      final systemLocale = await _speech.systemLocale();
+      _lastLocaleId = systemLocale?.localeId ?? (locales.isNotEmpty ? locales.first.localeId : '');
+    }
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleListening() async {
+    if (!_speechAvailable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Speech recognition not available on this device')),
+      );
+      return;
+    }
+
+    if (_isListening) {
+      await _speech.stop();
+      setState(() => _isListening = false);
+      _pulseController.stop();
+      _pulseController.reset();
+    } else {
+      setState(() => _isListening = true);
+      _pulseController.repeat(reverse: true);
+
+      await _speech.listen(
+        onResult: (result) {
+          setState(() {
+            _controller.text = result.recognizedWords;
+            _controller.selection = TextSelection.fromPosition(
+              TextPosition(offset: _controller.text.length),
+            );
+          });
+          // Auto-send when speech is final (user stopped talking)
+          if (result.finalResult && _controller.text.trim().isNotEmpty) {
+            _sendMessage();
+          }
+        },
+        localeId: _lastLocaleId,
+        listenMode: stt.ListenMode.dictation,
+        cancelOnError: true,
+        partialResults: true,
+      );
+    }
   }
 
   @override
@@ -38,6 +127,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _controller.dispose();
     _scrollController.dispose();
     _bounceController.dispose();
+    _pulseController.dispose();
+    _speech.stop();
     super.dispose();
   }
 
@@ -309,45 +400,114 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         color: Colors.white,
         border: Border(top: BorderSide(color: Color(0xFFE8DCC8))),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              enabled: !_loading,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _sendMessage(),
-              decoration: InputDecoration(
-                hintText: 'Talk to Pixel...',
-                hintStyle: const TextStyle(color: Color(0xFF999999)),
-                filled: true,
-                fillColor: const Color(0xFFF5F0E6),
-                border: OutlineInputBorder(
+          // Listening indicator
+          if (_isListening)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Color(0xFFFF5252),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Listening...',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFFFF5252),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Row(
+            children: [
+              // Mic button
+              if (_speechAvailable)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: AnimatedBuilder(
+                    animation: _pulseAnimation,
+                    builder: (context, child) {
+                      return Transform.scale(
+                        scale: _isListening ? _pulseAnimation.value : 1.0,
+                        child: child,
+                      );
+                    },
+                    child: Material(
+                      color: _isListening
+                          ? const Color(0xFFFF5252)
+                          : const Color(0xFFF5F0E6),
+                      borderRadius: BorderRadius.circular(22),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(22),
+                        onTap: _loading ? null : _toggleListening,
+                        child: SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: Icon(
+                            _isListening ? Icons.stop : Icons.mic,
+                            color: _isListening
+                                ? Colors.white
+                                : const Color(0xFF7C4DFF),
+                            size: 22,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // Text field
+              Expanded(
+                child: TextField(
+                  controller: _controller,
+                  enabled: !_loading && !_isListening,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _sendMessage(),
+                  decoration: InputDecoration(
+                    hintText: _isListening ? 'Speak now...' : 'Talk to Pixel...',
+                    hintStyle: const TextStyle(color: Color(0xFF999999)),
+                    filled: true,
+                    fillColor: const Color(0xFFF5F0E6),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(22),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+              ),
+              // Send button
+              const SizedBox(width: 8),
+              Material(
+                color: _controller.text.trim().isEmpty || _loading
+                    ? const Color(0xFFD1C4E9)
+                    : const Color(0xFF7C4DFF),
+                borderRadius: BorderRadius.circular(22),
+                child: InkWell(
                   borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
+                  onTap: _sendMessage,
+                  child: const SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Icon(Icons.send, color: Colors.white, size: 20),
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Material(
-            color: _controller.text.trim().isEmpty || _loading
-                ? const Color(0xFFD1C4E9)
-                : const Color(0xFF7C4DFF),
-            borderRadius: BorderRadius.circular(22),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(22),
-              onTap: _sendMessage,
-              child: const SizedBox(
-                width: 44,
-                height: 44,
-                child: Icon(Icons.send, color: Colors.white, size: 20),
-              ),
-            ),
+            ],
           ),
         ],
       ),
