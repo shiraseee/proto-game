@@ -1,0 +1,24 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Environment
+.env
+
+# macOS
+.DS_Store
+*.pem
+
+# Pub
+.pub-cache/
+pubspec.lock
